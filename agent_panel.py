@@ -305,12 +305,12 @@ def render_panel():
             st.info("Enter a question and click 'Analyze' to see results.")
 
         elif phase in ("thinking", "acting"):
-            with st.expander("Agent Reasoning Trace", expanded=True):
+            with st.expander("Agent Reasoning Trace", expanded=False):
                 render_events()
             st.spinner("Agent is thinking...")
 
         elif phase == "awaiting_approval":
-            with st.expander("Agent Reasoning Trace", expanded=True):
+            with st.expander("Agent Reasoning Trace", expanded=False):
                 render_events()
             approved, edited, rejected = render_pending_approval()
             actions = {"approved": approved, "edited": edited, "rejected": rejected}
@@ -318,18 +318,18 @@ def render_panel():
         elif phase == "awaiting_edit":
             rewrite_index = get_state("agent_rewrite_event_index")
             if rewrite_index is not None:
-                with st.expander("Agent Reasoning Trace", expanded=True):
+                with st.expander("Agent Reasoning Trace", expanded=False):
                     _, inline_actions = render_events(inline_edit_index=rewrite_index)
                 if inline_actions:
                     actions.update(inline_actions)
             else:
-                with st.expander("Agent Reasoning Trace", expanded=True):
+                with st.expander("Agent Reasoning Trace", expanded=False):
                     render_events()
                 submitted, edit_prompt, cancelled = render_pending_edit()
                 actions = {"edit_submitted": submitted, "edit_prompt": edit_prompt, "edit_cancelled": cancelled}
 
         elif phase == "awaiting_feedback":
-            with st.expander("Agent Reasoning Trace", expanded=True):
+            with st.expander("Agent Reasoning Trace", expanded=False):
                 render_events()
             submitted, feedback = render_pending_feedback()
             actions = {"submitted": submitted, "feedback": feedback}
@@ -351,7 +351,7 @@ def render_panel():
 
 # ── Lifecycle ──
 
-def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=False):
+def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=False, auto_approve=False):
     # Phases: idle -> thinking <-> acting -> awaiting_approval -> thinking ... -> done
     #                                     -> awaiting_edit -> acting (regenerate) -> awaiting_approval ...
     #                                     -> awaiting_feedback -> thinking ... -> done
@@ -366,14 +366,16 @@ def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=F
         run_step(client)
         st.rerun()
     elif phase == "awaiting_approval":
-        if actions.get("approved"):
+        if auto_approve or actions.get("approved"):
             execute_pending_tools()
             st.rerun()
         elif actions.get("edited"):
             set_state("agent_phase", "awaiting_edit")
             st.rerun()
         elif actions.get("rejected"):
-            set_state("agent_phase", "awaiting_feedback")
+            get_state("agent_events").append({"type": "answer", "thought": "", "answer": "Rejected."})
+            set_state("agent_pending_message", None)
+            set_state("agent_phase", "done")
             st.rerun()
     elif phase == "awaiting_edit":
         if actions.get("edit_cancelled"):

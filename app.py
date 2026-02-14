@@ -85,7 +85,8 @@ with col1:
         placeholder="e.g., What is the average IMDB rating?"
     )
     show_chart = st.checkbox("Show chart")
+    auto_approve = st.checkbox("Auto-drive")
     analyze_button = st.button("Analyze", type="primary")
 
 with col2:
-    agent_panel(client, analyze_button, user_question, filtered_df, show_chart)
+    agent_panel(client, analyze_button, user_question, filtered_df, show_chart, auto_approve)
