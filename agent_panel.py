@@ -16,6 +16,7 @@ DEFAULT_STATE = {
     "agent_df": None,
     "agent_chart_specs": [],
     "agent_pending_message": None,
+    "agent_rewrite_event_index": None,
 }
 
 def get_state(key):
@@ -90,6 +91,7 @@ def execute_pending_tools():
     df = get_state("agent_df")
     pending_msg = get_state("agent_pending_message")
 
+    rewind_point = len(messages)
     messages.append(pending_msg)
     for tc in pending_msg.tool_calls:
         args = json.loads(tc.function.arguments)
@@ -99,6 +101,7 @@ def execute_pending_tools():
             get_state("agent_events").append({
                 "type": "action", "name": tc.function.name,
                 "code": args["code"], "result": result,
+                "_rewind_point": rewind_point,
             })
         elif tc.function.name == "CreateChart":
             spec, result = validate_chart(args["vega_lite_spec"])
@@ -107,6 +110,7 @@ def execute_pending_tools():
             get_state("agent_events").append({
                 "type": "chart", "name": tc.function.name,
                 "spec_str": args["vega_lite_spec"], "result": result,
+                "_rewind_point": rewind_point,
             })
 
         messages.append({"role": "tool", "content": result, "tool_call_id": tc.id})
@@ -138,8 +142,32 @@ def reject_pending_tools(feedback):
 
 # ── Rendering ──
 
-def render_events():
-    for event in get_state("agent_events"):
+TOOL_DESCRIPTIONS = {
+    "QueryMovieDB": "Runs Python code on the movie database to compute a result.",
+    "CreateChart": "Creates a Vega-Lite chart visualization from the data.",
+}
+
+def _get_latest_thought():
+    events = get_state("agent_events")
+    for event in reversed(events):
+        if event["type"] == "thought":
+            return event["thought"]
+    return None
+
+def _render_inline_edit():
+    st.info("Describe how you want the code/spec changed. The agent will regenerate it.")
+    edit_prompt = st.text_input("What changes do you want?", key="edit_prompt")
+    col1, col2 = st.columns(2)
+    with col1:
+        submitted = st.button("Submit Edit", type="primary", use_container_width=True)
+    with col2:
+        cancelled = st.button("Cancel", use_container_width=True)
+    return {"edit_submitted": submitted, "edit_prompt": edit_prompt, "edit_cancelled": cancelled}
+
+def render_events(allow_rewind=False, inline_edit_index=None):
+    clicked_index = None
+    inline_edit_actions = None
+    for i, event in enumerate(get_state("agent_events")):
         if event["type"] == "thought":
             st.markdown(f"**Thought:** {event['thought']}")
         elif event["type"] == "action":
@@ -147,37 +175,57 @@ def render_events():
             st.code(event["code"], language="python")
             st.markdown("**Observation:**")
             st.code(event["result"], language="text")
+            if allow_rewind:
+                if st.button("Edit", key=f"rewind_{i}"):
+                    clicked_index = i
+            if inline_edit_index is not None and i == inline_edit_index:
+                inline_edit_actions = _render_inline_edit()
             st.divider()
         elif event["type"] == "chart":
             st.markdown(f"**Action:** `{event['name']}`")
             st.code(event["spec_str"], language="json")
             st.markdown("**Observation:**")
             st.code(event["result"], language="text")
+            if allow_rewind:
+                if st.button("Edit", key=f"rewind_{i}"):
+                    clicked_index = i
+            if inline_edit_index is not None and i == inline_edit_index:
+                inline_edit_actions = _render_inline_edit()
             st.divider()
         elif event["type"] == "rejected":
             st.markdown(f"**Rejected:** `{event['name']}`")
             if event.get("feedback"):
                 st.text(f"Feedback: {event['feedback']}")
             st.divider()
+        elif event["type"] == "edited":
+            st.markdown(f"**Edit:** {event['prompt']}")
+            st.divider()
         elif event["type"] == "answer":
             st.markdown(f"**Thought:** {event['thought']}")
+    return clicked_index, inline_edit_actions
 
 def render_pending_approval():
     st.warning("The agent wants to perform the following action:")
+    thought = _get_latest_thought()
+    if thought:
+        st.markdown(f"**Agent's intent:** {thought}")
     for tc in get_state("agent_pending_message").tool_calls:
         args = json.loads(tc.function.arguments)
-        st.markdown(f"**Tool:** `{tc.function.name}`")
+        desc = TOOL_DESCRIPTIONS.get(tc.function.name, "")
+        st.markdown(f"**Tool:** `{tc.function.name}` — {desc}")
         if tc.function.name == "QueryMovieDB":
             st.code(args["code"], language="python")
         elif tc.function.name == "CreateChart":
             st.code(args["vega_lite_spec"], language="json")
 
-    btn_col1, btn_col2 = st.columns(2)
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
     with btn_col1:
         approved = st.button("Approve", type="primary", use_container_width=True)
     with btn_col2:
+        edited = st.button("Edit", use_container_width=True)
+    with btn_col3:
         rejected = st.button("Reject", use_container_width=True)
-    return approved, rejected
+    return approved, edited, rejected
 
 def render_pending_feedback():
     feedback = st.text_input(
@@ -186,6 +234,65 @@ def render_pending_feedback():
     )
     submitted = st.button("Submit Rejection", use_container_width=True)
     return submitted, feedback
+
+def render_pending_edit():
+    st.info("Describe how you want the code/spec changed. The agent will regenerate it.")
+    thought = _get_latest_thought()
+    if thought:
+        st.markdown(f"**Agent's intent:** {thought}")
+    pending_msg = get_state("agent_pending_message")
+    for tc in pending_msg.tool_calls:
+        args = json.loads(tc.function.arguments)
+        desc = TOOL_DESCRIPTIONS.get(tc.function.name, "")
+        st.markdown(f"**Tool:** `{tc.function.name}` — {desc}")
+        if tc.function.name == "QueryMovieDB":
+            st.code(args["code"], language="python")
+        elif tc.function.name == "CreateChart":
+            st.code(args["vega_lite_spec"], language="json")
+
+    edit_prompt = st.text_input(
+        "What changes do you want?",
+        key="edit_prompt",
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        submitted = st.button("Submit Edit", type="primary", use_container_width=True)
+    with col2:
+        cancelled = st.button("Cancel", use_container_width=True)
+    return submitted, edit_prompt, cancelled
+
+def edit_pending_tools(edit_prompt):
+    messages = get_state("agent_messages")
+    pending_msg = get_state("agent_pending_message")
+
+    edit_msg = f"User wants changes to the proposed code: {edit_prompt}. Regenerate the tool call with these changes."
+
+    messages.append(pending_msg)
+    for tc in pending_msg.tool_calls:
+        messages.append({"role": "tool", "content": edit_msg, "tool_call_id": tc.id})
+
+    get_state("agent_events").append({"type": "edited", "prompt": edit_prompt})
+    set_state("agent_pending_message", None)
+    set_state("agent_phase", "acting")
+
+def rewind_and_edit(event_index, edit_prompt):
+    events = get_state("agent_events")
+    rewind_point = events[event_index]["_rewind_point"]
+
+    messages = get_state("agent_messages")
+    del messages[rewind_point:]
+    del events[event_index:]
+
+    chart_specs = [
+        validate_chart(e["spec_str"])[0]
+        for e in events if e["type"] == "chart"
+    ]
+    set_state("agent_chart_specs", [s for s in chart_specs if s])
+
+    events.append({"type": "edited", "prompt": edit_prompt})
+    messages.append({"role": "user", "content": f"User wants changes: {edit_prompt}. Regenerate the tool call."})
+    set_state("agent_rewrite_event_index", None)
+    set_state("agent_phase", "acting")
 
 def render_panel():
     st.subheader("Analysis Results")
@@ -205,8 +312,21 @@ def render_panel():
         elif phase == "awaiting_approval":
             with st.expander("Agent Reasoning Trace", expanded=True):
                 render_events()
-            approved, rejected = render_pending_approval()
-            actions = {"approved": approved, "rejected": rejected}
+            approved, edited, rejected = render_pending_approval()
+            actions = {"approved": approved, "edited": edited, "rejected": rejected}
+
+        elif phase == "awaiting_edit":
+            rewrite_index = get_state("agent_rewrite_event_index")
+            if rewrite_index is not None:
+                with st.expander("Agent Reasoning Trace", expanded=True):
+                    _, inline_actions = render_events(inline_edit_index=rewrite_index)
+                if inline_actions:
+                    actions.update(inline_actions)
+            else:
+                with st.expander("Agent Reasoning Trace", expanded=True):
+                    render_events()
+                submitted, edit_prompt, cancelled = render_pending_edit()
+                actions = {"edit_submitted": submitted, "edit_prompt": edit_prompt, "edit_cancelled": cancelled}
 
         elif phase == "awaiting_feedback":
             with st.expander("Agent Reasoning Trace", expanded=True):
@@ -216,7 +336,9 @@ def render_panel():
 
         elif phase == "done":
             with st.expander("Agent Reasoning Trace", expanded=False):
-                render_events()
+                clicked_index, _ = render_events(allow_rewind=True)
+            if clicked_index is not None:
+                actions["rewind_index"] = clicked_index
             events = get_state("agent_events")
             if events and events[-1].get("answer"):
                 st.write("**Answer:**")
@@ -231,7 +353,9 @@ def render_panel():
 
 def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=False):
     # Phases: idle -> thinking <-> acting -> awaiting_approval -> thinking ... -> done
+    #                                     -> awaiting_edit -> acting (regenerate) -> awaiting_approval ...
     #                                     -> awaiting_feedback -> thinking ... -> done
+    #         done -> awaiting_edit (rewind) -> acting (regenerate) -> awaiting_approval ... -> done
     if analyze_button and user_question:
         restart_agent(user_question, filtered_df, show_chart)
 
@@ -245,8 +369,30 @@ def agent_panel(client, analyze_button, user_question, filtered_df, show_chart=F
         if actions.get("approved"):
             execute_pending_tools()
             st.rerun()
+        elif actions.get("edited"):
+            set_state("agent_phase", "awaiting_edit")
+            st.rerun()
         elif actions.get("rejected"):
             set_state("agent_phase", "awaiting_feedback")
+            st.rerun()
+    elif phase == "awaiting_edit":
+        if actions.get("edit_cancelled"):
+            if get_state("agent_pending_message"):
+                set_state("agent_phase", "awaiting_approval")
+            else:
+                set_state("agent_rewrite_event_index", None)
+                set_state("agent_phase", "done")
+            st.rerun()
+        elif actions.get("edit_submitted") and actions.get("edit_prompt"):
+            if get_state("agent_pending_message"):
+                edit_pending_tools(actions["edit_prompt"])
+            elif get_state("agent_rewrite_event_index") is not None:
+                rewind_and_edit(get_state("agent_rewrite_event_index"), actions["edit_prompt"])
+            st.rerun()
+    elif phase == "done":
+        if actions.get("rewind_index") is not None:
+            set_state("agent_rewrite_event_index", actions["rewind_index"])
+            set_state("agent_phase", "awaiting_edit")
             st.rerun()
     elif phase == "awaiting_feedback" and actions.get("submitted"):
         reject_pending_tools(actions.get("feedback", ""))
